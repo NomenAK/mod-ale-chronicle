@@ -100,6 +100,17 @@ void HttpManager::StopHttpWorker()
     startedWorkerThread = false;
 }
 
+void HttpManager::QueueErrorResponse(int funcRef, const std::string& errorBody)
+{
+    // Transport-level failure: there is no HTTP status to report. Queue a
+    // statusCode 0 response through the same queue as successes, so that
+    // HandleHttpResponses still invokes the Lua callback (status 0, error
+    // message as body, empty headers) on the Lua-owning thread and releases
+    // funcRef. Dropping the request here would leak the callback ref and
+    // leave Lua-side failure handling (retry/backoff) unreachable.
+    responseQueue.push(new HttpResponse(funcRef, 0, errorBody, httplib::Headers()));
+}
+
 void HttpManager::HttpWorkerThread()
 {
     while (true)
@@ -125,6 +136,9 @@ void HttpManager::HttpWorkerThread()
             continue;
         }
 
+        // Invariant: every dequeued work item queues exactly one HttpResponse
+        // (success or error), so HandleHttpResponses always invokes the Lua
+        // callback and releases its funcRef.
         try
         {
             std::string host;
@@ -132,6 +146,8 @@ void HttpManager::HttpWorkerThread()
 
             if (!ParseUrl(req->url, host, path)) {
                 ALE_LOG_ERROR("[ALE]: Could not parse URL {}", req->url);
+                QueueErrorResponse(req->funcRef, "could not parse URL: " + req->url);
+                delete req;
                 continue;
             }
 
@@ -145,6 +161,8 @@ void HttpManager::HttpWorkerThread()
             if (err != httplib::Error::Success)
             {
                 ALE_LOG_ERROR("[ALE]: HTTP request error: {}", httplib::to_string(err));
+                QueueErrorResponse(req->funcRef, httplib::to_string(err));
+                delete req;
                 continue;
             }
 
@@ -157,6 +175,8 @@ void HttpManager::HttpWorkerThread()
                 if (!ParseUrl(location, host, path))
                 {
                     ALE_LOG_ERROR("[ALE]: Could not parse URL after redirect: {}", location);
+                    QueueErrorResponse(req->funcRef, "could not parse URL after redirect: " + location);
+                    delete req;
                     continue;
                 }
                 httplib::Client cli2(host);
@@ -164,6 +184,14 @@ void HttpManager::HttpWorkerThread()
                 cli2.set_read_timeout(60, 0); // 60 seconds — covers LLM inference + safety margin
                 cli2.set_write_timeout(30, 0); // 30 seconds
                 res = DoRequest(cli2, req, path);
+                err = res.error();
+                if (err != httplib::Error::Success)
+                {
+                    ALE_LOG_ERROR("[ALE]: HTTP request error after redirect: {}", httplib::to_string(err));
+                    QueueErrorResponse(req->funcRef, httplib::to_string(err));
+                    delete req;
+                    continue;
+                }
             }
 
             responseQueue.push(new HttpResponse(req->funcRef, res->status, res->body, res->headers));
@@ -171,6 +199,10 @@ void HttpManager::HttpWorkerThread()
         catch (const std::exception& ex)
         {
             ALE_LOG_ERROR("[ALE]: HTTP request error: {}", ex.what());
+            // Nothing was queued for this request (the success push is the last
+            // statement of the try block and queueing a HttpResponse* cannot
+            // throw once allocated), so this cannot double-invoke the callback.
+            QueueErrorResponse(req->funcRef, ex.what());
         }
 
         delete req;

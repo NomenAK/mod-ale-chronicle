@@ -2630,6 +2630,10 @@ namespace LuaGlobalFunctions
      *
      * When the passed callback function is called, the parameters `(status, body, headers)` are passed to it.
      *
+     * If the request fails before an HTTP response is received (unparsable URL, connection refused,
+     * timeout, ...), the callback is still invoked, with `status` set to 0, `body` set to the transport
+     * error message and `headers` set to an empty table.
+     *
      *     -- GET example (prints a random word)
      *     HttpRequest("GET", "https://random-word-api.herokuapp.com/word", function(status, body, headers)
      *         print("Random word: " .. string.sub(body, 3, body:len() - 2))
