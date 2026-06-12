@@ -45,6 +45,7 @@ public:
 private:
     void ClearQueues();
     void HttpWorkerThread();
+    void QueueErrorResponse(int funcRef, const std::string& errorBody);
     bool ParseUrl(const std::string& url, std::string& host, std::string& path);
     httplib::Result DoRequest(httplib::Client& client, HttpWorkItem* req, const std::string& path);
 
